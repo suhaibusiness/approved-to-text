@@ -291,6 +291,9 @@ function resultCard(r) {
 const shortUrl = (u) => { try { const x = new URL(u); return x.host + (x.pathname === '/' ? '' : x.pathname); } catch { return u; } };
 const ORDER = { fail: 0, warn: 1, manual: 2, advice: 3, pass: 4, skip: 5 };
 
+// AC-O8: the one Beyond 1M line, after a result only
+const B1M = '<p class="small muted b1m no-print">Once you’re approved, every text needs a fast answer. We also make Beyond 1M, which answers your calls and texts and follows up your quotes.</p>';
+
 function drawResults() {
   const out = $('#check-results'); if (!out || !S.check) return;
   const { report, url } = S.check;
@@ -710,7 +713,7 @@ function renderPack(panel) {
         ${tick('If it’s rejected, fix and resubmit the same campaign: the vetting fee is charged once per campaign', 'Twilio 30922; HighLevel fees')}
       </ul>
       ${remind}
-    </article>`;
+    </article>${B1M}`;
   $('#print').onclick = () => window.print();
   $('#save-proj2').onclick = saveProject;
 }
@@ -760,7 +763,7 @@ function buildRejection(body) {
     }
     if (!r.codes.length) html = r.phrases.length ? `<section class="code-card"><h3>No error code found, but the message mentions:</h3><p class="muted">Matched from the words in your message. If you have the code (it starts with 30), paste it for a more exact answer.</p><ul>${r.phrases.map(item).join('')}</ul></section>`
       : '<div class="note warn"><p>We couldn’t match that message. If it has an error code (a number starting with 30), paste it here. You can also run the <a href="#/app/check">website check</a>, which covers the most common reasons.</p></div>';
-    out.innerHTML = html;
+    out.innerHTML = html + (r.codes.length || r.phrases.length ? B1M : '');
   });
 }
 
