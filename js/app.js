@@ -7,6 +7,7 @@ import { normaliseInput } from '../lib/crawl.mjs';
 import { BLANK, clone, merge, webUrl, isProjectFile } from './state.js';
 import { explainTF, windowLeft, policyTF, readRejection, TF_SAMPLE } from './tollfree.js';
 import { readDoc } from './docread.js';
+import { siteFacts, pageText, NEEDED } from './sitefacts.js';
 import { TF_CODES, TF_CONFLICT, TF_WINDOW, TF_FIELDS, TF_ARTICLE, TF_GUIDE_URL } from './tf-data.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -20,7 +21,9 @@ const CODE = new Map(TWILIO_CODES.map((c) => [c.code, c]));
 const CRAWLER = document.querySelector('meta[name="a2p-crawler"]')?.content || '';
 
 // ---------- state ----------
-let S = (() => { try { return merge(JSON.parse(localStorage.getItem('a2p-state') || 'null')); } catch { return clone(BLANK); } })();
+// sources and missing (one-input spec §5.3) are added here when an older saved state has none.
+const withReads = (s) => Object.assign(s, { sources: s.sources || {}, missing: s.missing || [] });
+let S = withReads((() => { try { return merge(JSON.parse(localStorage.getItem('a2p-state') || 'null')); } catch { return clone(BLANK); } })());
 function save() { try { localStorage.setItem('a2p-state', JSON.stringify(S)); } catch {} }
 
 // ---------- small helpers ----------
@@ -95,22 +98,48 @@ function validate(b) {
 }
 const businessReady = () => !Object.keys(validate(S.business)).length && !forbidden(S.business);
 
+// Source labels (one-input spec §5.3) and the "couldn't find" line for a detail the website reader looked for.
+const SRC = { site: 'From your website', guess: 'Our guess: check it', typed: 'You typed this' };
+const srcTag = (k) => `<span class="tag-src" id="s-${k}">${SRC[S.sources[k]] || ''}</span>`;
+const isMissing = (k) => S.missing.includes(k) && !String(S.business[k] ?? '').trim();
+const missLine = (k) => `<p class="miss${isMissing(k) ? '' : ' hidden'}" id="m-${k}">We couldn’t find this on your website.</p>`;
 function fieldHtml(name, label, control, hint = '', optional = false) {
-  return `<div class="field" data-f="${name}"><label for="f-${name}">${label}${optional ? ' <span class="opt">(optional)</span>' : ''}</label>${control}${hint ? `<p class="hint" id="h-${name}">${hint}</p>` : ''}<p class="err hidden" id="e-${name}"></p></div>`;
+  return `<div class="field" data-f="${name}"><label for="f-${name}">${label}${optional ? ' <span class="opt">(optional)</span>' : ''}${srcTag(name)}</label>${control}${missLine(name)}${hint ? `<p class="hint" id="h-${name}">${hint}</p>` : ''}<p class="err hidden" id="e-${name}"></p></div>`;
+}
+// Fill the business details the reader found into the empty fields only; a value the owner typed is never replaced.
+// Returns how many fields it filled. Defaults marked "b" in the spec (what you send) are set only when nothing is ticked.
+function applyFacts({ values, guess }) {
+  const b = S.business; let n = 0;
+  for (const [k, v] of Object.entries(values)) {
+    if (!(k in b) || typeof b[k] !== 'string' || k === 'country' || String(b[k]).trim()) continue;
+    b[k] = v; S.sources[k] = guess[k] ? 'guess' : 'site'; n++;
+    if (k === 'street' && values.country) { b.country = values.country; S.sources.country = 'site'; }
+  }
+  if (n && !Object.values(b.sends).some(Boolean)) { Object.assign(b.sends, { reminders: true, quotes: true, replies: true }); S.sources.sends = 'guess'; }
+  S.missing = NEEDED.filter((k) => !String(b[k] ?? '').trim());
+  save();
+  return n;
 }
 const input = (name, type = 'text', attrs = '') => `<input type="${type}" id="f-${name}" name="${name}" value="${esc(S.business[name])}" aria-describedby="h-${name} e-${name}" ${attrs}>`;
 
+function readNote() {
+  const filled = Object.values(S.sources).filter((v) => v === 'site' || v === 'guess').length;
+  if (!filled && !S.missing.length) return '';
+  const miss = S.missing.filter(isMissing).length;
+  return `<div class="note${miss ? ' warn' : ''}" id="read-note"><p><b>We read your website and filled in ${filled} detail${filled === 1 ? '' : 's'}.</b> Each one says where it came from. Check them${miss ? `, add the ${miss} we couldn’t find,` : ''} then continue. ${S.check ? '<a href="#/app/check">See your website check</a>' : ''}</p></div>`;
+}
 function renderBusiness(panel) {
   const b = S.business;
   panel.innerHTML = `
   <div class="panel-head"><div><h1>Your business</h1><p>Carriers compare these details with your website and your tax records, so they need to match exactly. It takes about 3 minutes.</p></div></div>
+  ${readNote()}
   <div class="form-grid">
   <form id="biz" novalidate>
     <div class="card">
       <h2>Who you are</h2>
       ${fieldHtml('legalName', 'Legal business name', input('legalName', 'text', 'autocomplete="organization"'), 'Exactly as on your IRS letter (CP 575 or 147C), including LLC or Inc. Sole proprietors: your own full name.')}
       ${fieldHtml('dba', 'Name customers know you by', input('dba'), 'Your “doing business as” name, if it’s different. This is the name we put in your texts.', true)}
-      <fieldset class="field" data-f="entity" aria-describedby="e-entity"><legend>How is your business set up?</legend>
+      <fieldset class="field" data-f="entity" aria-describedby="e-entity"><legend>How is your business set up?${srcTag('entity')}</legend>
         <div class="choice-grid">
           <label class="choice"><input type="radio" name="entity" value="registered" ${b.entity === 'registered' ? 'checked' : ''}><div><b>Registered business</b><span>LLC, corporation, partnership, or anyone with an EIN</span></div></label>
           <label class="choice"><input type="radio" name="entity" value="sole" ${b.entity === 'sole' ? 'checked' : ''}><div><b>Sole proprietor</b><span>Just you, trading under your own name, with no EIN</span></div></label>
@@ -150,7 +179,7 @@ function renderBusiness(panel) {
     </div>
     <div class="card">
       <h2>What you text customers</h2>
-      <fieldset class="field" data-f="sends" aria-describedby="e-sends"><legend>Tick everything you send, or plan to</legend>
+      <fieldset class="field" data-f="sends" aria-describedby="e-sends"><legend>Tick everything you send, or plan to${srcTag('sends')}</legend>
         <div class="choice-grid">${SENDS.map(([k, l, s]) => `<label class="choice"><input type="checkbox" name="sends" value="${k}" ${b.sends[k] ? 'checked' : ''}><div><b>${l}</b><span>${s}</span></div></label>`).join('')}</div>
         <p class="err hidden" id="e-sends"></p></fieldset>
       <div class="${b.sends.marketing ? '' : 'hidden'}" id="mkt-freq">${fieldHtml('marketingPerMonth', 'Most marketing texts you’ll send one person in a month', input('marketingPerMonth', 'number', 'min="1" max="60" step="1" inputmode="numeric" style="max-width:120px"'), 'Your opt-in wording and terms state this number, so pick one you’ll stick to.')}</div>
@@ -187,6 +216,9 @@ function renderBusiness(panel) {
     else if (t.name === 'hasEin') { b2.hasEin = t.value; touched.add('hasEin'); }
     else if (t.name === 'country') { b2.country = t.value; $('label[for=f-state]').textContent = t.value === 'CA' ? 'Province' : 'State'; $('label[for=f-zip]').textContent = t.value === 'CA' ? 'Postal code' : 'ZIP'; }
     else if (t.name && t.name in b2) b2[t.name] = t.name === 'marketingPerMonth' ? t.value : t.value;
+    const k = t.name || '';
+    if (S.sources[k] === 'site' || S.sources[k] === 'guess') { S.sources[k] = 'typed'; const tag = $(`#s-${k}`); if (tag) tag.textContent = SRC.typed; }
+    $(`#m-${k}`)?.classList.toggle('hidden', !isMissing(k));
     save(); side(); showErrors();
   });
   form.addEventListener('focusout', (ev) => {
@@ -212,6 +244,9 @@ function renderBusiness(panel) {
     save(); location.hash = '#/app/check';
   });
   side();
+  // AC-A3: the first detail the reader couldn't find gets the focus (after route() has focused the heading)
+  const firstMiss = NEEDED.find(isMissing);
+  if (firstMiss) setTimeout(() => { const el = $(`#f-${firstMiss}`, form); if (el) { el.focus(); el.scrollIntoView({ block: 'center' }); } });
   if (S.business.legalName || S.business.email) { ['legalName', 'entity', 'email', 'phone', 'website', 'industry', 'sends'].forEach((k) => S.business[k] !== '' && touched.add(k)); showErrors(); }
 }
 
@@ -253,28 +288,51 @@ async function runCheck(raw) {
   checking = true; $('#check-go').disabled = true;
   status.innerHTML = `<div class="loading"><span class="spin" aria-hidden="true"></span><span>Reading your pages… This can take up to 30 seconds.</span></div>`;
   out.innerHTML = '';
-  let data;
-  try {
-    const res = await fetch(CRAWLER, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: raw }) });
-    data = await res.json().catch(() => ({ ok: false, message: `The checker answered with error ${res.status}.` }));
-  } catch {
-    data = { ok: false, reason: 'offline', message: 'We couldn’t reach the checker. If you’re running the kit on your own computer, start it with “node server.mjs” and reload this page.' };
-  }
+  const data = await readSite(raw);
   checking = false; $('#check-go').disabled = false;
+  // The reader itself failed (not the address): ask for the pages by paste instead, with a retry (spec §5.4)
+  if (!data.ok && READ_FAIL[data.reason]) return renderPaste(status.closest('#panel'), data);
   if (!data.ok) {
     const robots = data.reason === 'robots';
     status.innerHTML = `<div class="note ${robots ? 'warn' : 'fail'}" role="alert" style="margin:16px 0 0"><p><b>${robots ? 'Your site asks tools like ours not to read it.' : 'We couldn’t check that site.'}</b> ${esc(robots ? 'So we didn’t. You can still check it by hand with the list below and build every page in step 3.' : data.message || 'Please try again.')}</p></div>
       ${robots ? `<div class="card" style="margin-top:16px"><h2>Check it by hand</h2>${Object.entries(HAND).map(([g, t]) => `<h3>${esc(GROUPS[g])}</h3><p class="muted">${esc(t)}</p>`).join('')}</div>` : ''}`;
     return;
   }
+  // One-input flow (AC-A1): the details the site holds fill the empty fields, then the review screen opens, unless
+  // the details were already complete before this read.
+  const firstRead = !businessReady();
+  const filled = applyFacts(siteFacts(data.pages));
   const report = checkSite(data, S.business);
   S.check = { url, report };
   save();
+  if (firstRead && (filled || S.missing.length)) { location.hash = '#/app/business'; return; }
   status.innerHTML = '';
   $('#check-go').textContent = 'Check again';
   drawResults();
   renderStepper('check');
   $('#check-results').focus?.();
+}
+
+// The website reader (meta a2p-crawler): POST {url} -> crawl.mjs's reply. A failure of the reader itself comes back
+// with one of READ_FAIL's reasons, so the caller can ask for that one page by paste instead.
+const READ_FAIL = { offline: 'we couldn’t reach our website reader', busy: 'our website reader is busy with other sites', rate_limited: 'you’ve used your website reads for the moment',
+  timeout: 'your site took longer than 25 seconds to answer', error: 'something went wrong on our side' };
+async function readSite(raw) {
+  try {
+    const res = await fetch(CRAWLER, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: String(raw).trim() }) });
+    const data = await res.json().catch(() => null);
+    if (data && typeof data === 'object') return data;
+    return { ok: false, reason: res.status === 429 ? 'busy' : res.status >= 500 ? 'offline' : 'error', message: `The reader answered with error ${res.status}.` };
+  } catch {
+    return { ok: false, reason: 'offline', message: 'We couldn’t reach the website reader.' };
+  }
+}
+const failLine = (f) => `We couldn’t read your site right now (${READ_FAIL[f.reason] || READ_FAIL.error})`;
+// A retry button that waits out retryAfter (seconds) when the reader gave one.
+function retryButton(id, f) {
+  const wait = Math.max(0, Math.min(3600, Number(f.retryAfter) || 0));
+  if (wait) setTimeout(() => { const b = document.getElementById(id); if (b) { b.disabled = false; b.textContent = 'Try reading it again'; } }, wait * 1000);
+  return `<button type="button" class="btn sm" id="${id}" ${wait ? 'disabled' : ''}>${wait ? `Try again in ${wait < 90 ? `${wait} seconds` : `${Math.ceil(wait / 60)} minutes`}` : 'Try reading it again'}</button>`;
 }
 
 function resultCard(r) {
@@ -329,9 +387,10 @@ const SLOTS = [
   ['terms', 'SMS terms (or your terms of service)', 'yourbusiness.com/terms'],
   ['optin', 'Page with your sign-up or contact form', 'yourbusiness.com/contact'],
 ];
-function renderPaste(panel) {
+function renderPaste(panel, fail = null) {
   const b = S.business;
   panel.innerHTML = `<div class="panel-head"><div><h1>Website check</h1><p>Paste your website’s pages and we’ll test each rule that commonly gets a registration rejected, the way a carrier reviewer would.</p></div></div>
+    ${fail ? `<div class="note warn" role="alert" id="read-fail"><p><b>${esc(failLine(fail))}.</b> Paste the text of each page below and we’ll check it here instead. ${retryButton('retry-read', fail)}</p></div>` : ''}
     <div class="card">
       <h2>How to copy a page</h2>
       <ol class="small paste-how">
@@ -354,6 +413,7 @@ function renderPaste(panel) {
     </div>
     <div id="check-results"></div>`;
   $('#paste-form').addEventListener('submit', (ev) => { ev.preventDefault(); runPaste(); });
+  if (fail) $('#retry-read').onclick = () => { S.pendingCheck = true; save(); route(); };
   if (S.check) drawResults();
 }
 function runPaste() {
@@ -792,6 +852,7 @@ function runTF() {
   const r = explainTF(text);
   if (r.empty) { out.innerHTML = '<p class="err" role="alert">Paste the rejection text or code first.</p>'; $('#tf-text').focus(); return; }
   fillWindow(text);
+  if (CRAWLER) tfAutoRead(text);
   if (r.cards.length) { out.innerHTML = r.cards.map(tfCard).join(''); return; }
   out.innerHTML = r.matches.length
     ? `<section class="code-card"><h3>Possible matches from the words in your message</h3><p class="muted">We found no error code, so these are Twilio’s toll-free reasons that share words with your message. If you have the code (it starts with 30), paste it for an exact answer.</p>
@@ -820,6 +881,50 @@ function showLeft() {
   const maybe = tf.unsure && w.kind === 'date' ? `<span class="tf-maybe" id="tf-maybe">This may be later than your real deadline: the paste has no date, so we used today. Pick the day Twilio rejected it, or <button type="button" class="btn sm" id="tf-ok">Yes, it was today</button></span>` : '';
   out.innerHTML = `<span class="tf-left${w.ended ? ' ended' : ''}">${esc(w.message)}</span>${maybe}
     <span class="small muted tf-block">${w.kind === 'expiration' ? `Twilio: <q>${esc(TF_FIELDS.edit_expiration)}</q>` : 'Counted from the start of that day, so this is the earliest the window can end.'}</span>`;
+}
+// AC-A5 / AC-A7: the policy check's name, privacy and terms come from what the tool already holds (the paste, the saved
+// business details, the website reader), never asked again; a box the owner typed in is never overwritten.
+const tfPol = { auto: { name: false, privacy: false, terms: false }, site: '' };
+function tfFill(k, v, label) {
+  const el = $(`#tf-${k}`); if (!el || !v || (el.value.trim() && !tfPol.auto[k])) return false;
+  el.value = v; tfPol.auto[k] = true; tfSource(`tf-${k}`, label); return true;
+}
+const pasteName = (text) => (/request for (.{2,80}?) has been rejected/i.exec(text) || [])[1] || '';
+const pasteSite = (text) => (/^\s*(?:business[ _])?website(?:[ _]url)?\s*[:=]\s*(\S+)/im.exec(text) || [])[1] || '';
+function tfAutoRead(text) {
+  if (tfPol.sample) return;
+  if (!tfFill('name', pasteName(text), 'From your paste')) tfFill('name', S.business.legalName || S.business.dba, 'From your saved details');
+  const site = pasteSite(text) || (!S.business.noWebsite && S.business.website) || '';
+  if (!site) { $('#tf-site-row').classList.remove('hidden'); return; }
+  if (site !== tfPol.site) readPolicies(site);
+}
+let tfReading = false;
+async function readPolicies(site) {
+  if (tfReading) return;
+  const st = $('#tf-read'); tfReading = true; tfPol.site = site;
+  $('#tf-site-row').classList.add('hidden');
+  st.innerHTML = `<div class="loading"><span class="spin" aria-hidden="true"></span><span>Reading your privacy policy and SMS terms from ${esc(site)}… This can take up to 30 seconds.</span></div>`;
+  const data = await readSite(site);
+  tfReading = false;
+  if (!data.ok) {
+    tfPol.site = '';
+    const why = READ_FAIL[data.reason] ? `${failLine(data)}.` : data.reason === 'robots' ? 'Your site asks robots not to read it, so we didn’t.' : `${data.message || 'We couldn’t read that site.'}`;
+    st.innerHTML = `<div class="note warn" role="alert"><p><b>${esc(why)}</b> Paste the text of your privacy policy and SMS terms below. ${READ_FAIL[data.reason] ? retryButton('tf-retry', data) : ''}</p></div>`;
+    $('#tf-retry')?.addEventListener('click', () => readPolicies(site));
+    if (!READ_FAIL[data.reason]) { $('#tf-site').value = site; $('#tf-site-row').classList.remove('hidden'); }
+    return;
+  }
+  const page = (role) => data.pages.find((p) => (p.roles || []).includes(role) && p.status >= 200 && p.status < 400);
+  const missing = [];
+  for (const [k, role, name] of [['privacy', 'privacy', 'privacy policy'], ['terms', 'terms', 'SMS terms']]) {
+    const p = page(role);
+    if (p) tfFill(k, pageText(p), `From your website (${shortUrl(p.finalUrl || p.url)})`); else missing.push(name);
+  }
+  if (!$('#tf-name').value.trim()) tfFill('name', siteFacts(data.pages).values.legalName, 'From your website');
+  st.innerHTML = missing.length
+    ? `<div class="note warn" role="alert"><p><b>We didn’t find ${missing.length === 2 ? 'a privacy policy or SMS terms page' : `a${missing[0] === 'SMS terms' ? 'n' : ''} ${missing[0]} page`} on ${esc(shortUrl(data.finalUrl || site))}.</b> Paste ${missing.length === 2 ? 'their' : 'its'} text below, or <a href="#/app/build">build ${missing.length === 2 ? 'them' : 'it'} with the 10DLC kit</a>.</p></div>`
+    : `<p class="small muted">Read from ${esc(shortUrl(data.finalUrl || site))}. Check the text below is your current policy and terms.</p>`;
+  runPolicy();
 }
 function runPolicy() {
   const rows = policyTF({ name: $('#tf-name').value, privacy: $('#tf-privacy').value, terms: $('#tf-terms').value });
@@ -850,18 +955,28 @@ function renderTollFree(param) {
         <p class="small muted">Twilio: <q>${esc(TF_FIELDS.edit_allowed)}</q> ${ext(TF_FIELDS.url, 'Source')}</p>
       </section>
       <section class="card tf-section" aria-labelledby="tf-pol-h"><h2 id="tf-pol-h">Check your privacy policy and SMS terms</h2>
-        <p class="muted">Since 15 Sep 2026, new toll-free submissions need separate privacy policy and terms links. Paste the text of each page to check it against what Twilio’s toll-free codes ask for. Empty boxes are skipped.</p>
+        <p class="muted">Since 15 Sep 2026, new toll-free submissions need separate privacy policy and terms links. ${CRAWLER ? 'We read both pages from your website and check them' : 'Paste the text of each page to check it'} against what Twilio’s toll-free codes ask for. Empty boxes are skipped.</p>
+        ${CRAWLER ? `<div class="field hidden" id="tf-site-row"><label for="tf-site">Your website, so we can read your privacy policy and SMS terms</label>
+          <div class="check-form"><input type="url" id="tf-site" inputmode="url" spellcheck="false" placeholder="yourbusiness.com"><button class="btn" type="button" id="tf-site-go">Read my pages</button></div></div>
+          <div id="tf-read" aria-live="polite"></div>` : ''}
         <form id="tf-pol-form" novalidate>
-          <div class="field"><label for="tf-name">Business or programme name</label><input type="text" id="tf-name" autocomplete="organization"></div>
-          <div class="field"><label for="tf-privacy">Privacy policy text</label><textarea id="tf-privacy" rows="5"></textarea></div>
-          <div class="field"><label for="tf-terms">SMS terms text</label><textarea id="tf-terms" rows="5"></textarea></div>
+          <div class="field"><label for="tf-name">Business or programme name <span class="tag-src" id="tf-name-src"></span></label><input type="text" id="tf-name" autocomplete="organization"></div>
+          <div class="field"><label for="tf-privacy">Privacy policy text <span class="tag-src" id="tf-privacy-src"></span></label><textarea id="tf-privacy" rows="5"></textarea></div>
+          <div class="field"><label for="tf-terms">SMS terms text <span class="tag-src" id="tf-terms-src"></span></label><textarea id="tf-terms" rows="5"></textarea></div>
           <div class="actions"><button class="btn primary" type="submit">Check the text</button></div>
         </form>
         <div id="tf-policy-out" class="tf-policy-out" aria-live="polite"></div>
       </section>
       <div class="note tf-links"><p>Need to fill in the form itself? Use ${ext('https://a2p.guide/tools/tollfree-field-builder', 'a2p.guide’s free field builder')} or ${ext(TF_GUIDE_URL, 'Twilio’s onboarding guide')}. <a href="codes/toll-free.html">All toll-free codes</a> on one page.</p></div>`;
     $('#tf-form').addEventListener('submit', (e) => { e.preventDefault(); runTF(); });
+    $('#tf-text').addEventListener('input', () => { tfPol.sample = false; });
     $('#tf-pol-form').addEventListener('submit', (e) => { e.preventDefault(); runPolicy(); });
+    for (const k of ['name', 'privacy', 'terms']) $(`#tf-${k}`).addEventListener('input', () => { tfPol.auto[k] = false; tfSource(`tf-${k}`, $(`#tf-${k}`).value ? 'You typed this' : ''); });
+    if (CRAWLER) {
+      const go = () => { const v = $('#tf-site').value; try { normaliseInput(v); } catch (x) { $('#tf-read').innerHTML = `<p class="err" role="alert">${esc(x.message)}</p>`; $('#tf-site').focus(); return; } readPolicies(v.trim()); };
+      $('#tf-site-go').onclick = go;
+      $('#tf-site').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    }
     for (const id of ['#tf-date', '#tf-exp']) {
       const k = id === '#tf-date' ? 'date' : 'exp';
       const typed = () => { tf.auto[k] = false; if (k === 'date') tf.unsure = false; tfSource(id.slice(1), $(id).value ? 'Your answer' : ''); showLeft(); };
@@ -888,6 +1003,7 @@ function renderTollFree(param) {
     form.addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (!f) return; e.preventDefault(); form.classList.remove('over'); readShot(f); });
     $('#tf-sample').onclick = () => {
       const d = new Date(); d.setDate(d.getDate() - 2);
+      tfPol.sample = true; // the sample brings its own policy text: no website read
       $('#tf-text').value = TF_SAMPLE.rejection; $('#tf-date').value = isoDay(d); $('#tf-exp').value = '';
       Object.assign(tf, { auto: { date: false, exp: false }, unsure: false }); tfSource('tf-date', 'Sample'); tfSource('tf-exp', '');
       $('#tf-name').value = TF_SAMPLE.name; $('#tf-privacy').value = TF_SAMPLE.privacy; $('#tf-terms').value = TF_SAMPLE.terms;
@@ -907,7 +1023,7 @@ async function openProject(file) {
   try {
     const j = JSON.parse(await file.text());
     if (!isProjectFile(j)) throw new Error();
-    S = merge(j.state); save(); toast('Opened your project'); location.hash = '#/app/business'; route();
+    S = withReads(merge(j.state)); save(); toast('Opened your project'); location.hash = '#/app/business'; route();
   } catch { toast('That file isn’t an Approved to Text project.'); }
 }
 

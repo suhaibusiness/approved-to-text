@@ -5,6 +5,9 @@ export const BLANK = {
   check: null, // { url, report } — the rule results only, never the pages' HTML
   build: { siteUrl: '', mode: 'mailto', actionUrl: '', privacyKind: '', visited: false },
   urls: {}, answers: {}, pendingCheck: false,
+  // Where each business detail came from (one-input spec §5.3): 'site' (the website reader), 'guess' (a default or a
+  // best guess to check), 'typed'; and the details the reader looked for but couldn't find (shown, never left blank).
+  sources: {}, missing: [],
 };
 export const clone = (o) => JSON.parse(JSON.stringify(o));
 // A project file this tool saved: its app id (kept as a2p-ready since before the rename) and a saved state.
@@ -63,5 +66,9 @@ export function merge(j) {
     samples: (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : undefined), hasLinks: (v) => (typeof v === 'boolean' ? v : undefined),
     hasPhone: (v) => (typeof v === 'boolean' ? v : undefined) });
   s.pendingCheck = j.pendingCheck === true;
+  const FIELDS = Object.keys(s.business);
+  // Kept only when the saved state has them, so an older project file opens exactly as it was saved (the app adds them).
+  if ('sources' in j) s.sources = keep(j.sources, Object.fromEntries(FIELDS.map((k) => [k, (v) => one(v, ['site', 'guess', 'typed'], undefined)]))); else delete s.sources;
+  if ('missing' in j) s.missing = Array.isArray(j.missing) ? j.missing.filter((k) => FIELDS.includes(k)) : []; else delete s.missing;
   return s;
 }
